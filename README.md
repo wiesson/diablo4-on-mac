@@ -1,113 +1,62 @@
-# CEF under Wine: renderer crashes with `0x80000003` at a fixed `libcef.dll` address
+# Diablo IV on Apple Silicon
 
-**TL;DR — set `WINE_SIMULATE_WRITECOPY=1`.**
+A practical guide to getting **Diablo IV through Battle.net** running smoothly on
+your Mac — from a working launcher to your first game, graphics settings, and sound.
 
-Found while getting the Battle.net launcher (and through it Diablo IV) to run under a
-self-built Wine wrapper on an Apple Silicon Mac. The root cause is not graphics,
-not the sandbox and not the GPU process. It is how Wine reports the *previous*
-page protection of a copy-on-write image page.
+This started with an evening of getting Diablo IV running on an M3 Max. Battle.net
+would open with one Wine setup, while the game would run with another. We eventually
+got both working together, including account login, gameplay, and Bluetooth audio.
+These are the settings and lessons worth sharing.
 
-## Symptom
+**Verified on September 17, 2026:** M3 Max (40-core GPU, 48 GB memory), macOS 27.0,
+Battle.net build 17778, Diablo IV 3.2.1.73552. Gameplay felt very smooth; we have not
+recorded a benchmark or tested other Macs.
 
-```
-wine: Unhandled exception 0x80000003 in thread 0348 at address 6DE900E1 (thread 034c), starting debugger...
-```
+## Start here
 
-You are probably looking at this bug if **all** of these hold:
+1. **[Set up Battle.net and launch Diablo IV](docs/setup.md)** — what you need,
+   the working configuration, and how to check that both apps use it.
+2. **[Find comfortable graphics and audio settings](docs/settings.md)** — start
+   with a stable baseline, then tune for your display.
+3. **[Fix a problem](docs/troubleshooting.md)** — launcher crashes, “Playing Now”
+   without a game window, login errors, or missing headphone audio.
 
-- the address is **byte-identical on every crash**, across fresh prefixes and reboots
-- every CEF **renderer** process (`CrRendererMain`) dies and respawns in a loop, while the
-  browser process (`CrBrowserMain`) and utility processes keep running fine
-- there is **no** `[FATAL:...] Check failed:` line in the log, even though other
-  Chromium `ERROR:` lines are being written
-- GPU flags change nothing: `--in-process-gpu`, `--disable-gpu`,
-  `--disable-gpu-compositing`, `--no-sandbox`, software GL — all identical crash
+You will need your own Diablo IV license and a Wine wrapper with compatible graphics
+components. This repository is a configuration guide, not a game download or an
+automatic installer. The [tested components](docs/setup.md#the-tested-setup)
+are documented so you can compare your setup before changing it.
 
-## Root cause
+## The setting that got our launcher working
 
-The address is Chromium's `IMMEDIATE_CRASH()` — the byte sequence `cc 0f 0b`
-(`int3; ud2`). In official builds the `CHECK()` message is compiled out, which is why
-nothing is logged. The failing check is `base::ProtectedMemory`'s read-only transition:
-
-```c
-DWORD old;
-CHECK(VirtualProtect(page, 4096, PAGE_READONLY, &old));  /* succeeds */
-CHECK(old == PAGE_READWRITE);                            /* 4 — fails under Wine */
-```
-
-Wine maps writable PE image sections copy-on-write and reports `PAGE_WRITECOPY (8)`
-for a page that has never been written. Windows reports `PAGE_READWRITE (4)` for the
-same page. Chromium protects a page it has not written to yet, so the mismatch is hit
-every single time.
-
-In Battle.net build `17778`'s `libcef.dll` the guarded region is exactly one page at
-**RVA `0x097E9000`**, size `0x1000`, reached from a single call site at RVA `0x85D4E0`:
-
-```asm
-0085d4e3  mov byte ptr [0x19874cc4], 1   ; "initialized" flag (different page)
-0085d4ea  push 0x1000                    ; size
-0085d4ef  push 0x197e9000                ; addr   (preferred base 0x10000000)
-0085d4f4  call 0x16d00a0                 ; SetReadOnly(addr, size)
-```
-
-## Fix
+In our CrossOver-derived Wine build, Battle.net's login window needed this
+environment variable:
 
 ```sh
-export WINE_SIMULATE_WRITECOPY=1
+WINE_SIMULATE_WRITECOPY=1
 ```
 
-The switch already exists in CrossOver-derived Wine sources
-(`dlls/ntdll/unix/loader.c:hacks_init`, `dlls/ntdll/unix/virtual.c:NtProtectVirtualMemory`):
-it sets `VPROT_COPIED` and adjusts the protection value returned to the application.
-No binary patching, no modified game or DLL files, no launcher flags needed.
+Add it to the configuration that **launches Battle.net**. It is a Wine setting, not
+a Diablo IV command-line argument. It fixes the particular launcher crash we
+diagnosed; the game still needs a compatible Wine engine and D3DMetal setup.
+The [setup guide](docs/setup.md#configure-the-launcher) explains where it belongs.
 
-If your Wine build does not have the switch, the equivalent behaviour is: report
-`PAGE_READWRITE` instead of `PAGE_WRITECOPY` as the old protection of an image page.
+## A few things that made the difference
 
-## Verification
+- Launch the game through the configured **Battle.net**, so it receives your login.
+- Use **D3DMetal for Diablo IV** and a matching **32-bit DXMT for Battle.net**.
+- Keep the working Wine engine and its matching components together.
+- Connect Bluetooth headphones **before starting the game**.
+- Get into the game first; adjust graphics one setting at a time afterward.
 
-`tools/writecopy-probe32.c` maps a private, uninitialised copy of `libcef.dll` and
-checks the actual target page. Same engine, same prefix, only the switch differs:
+## Interested in the Wine fix?
 
-| operation | switch `0` | switch `1` |
-|---|---:|---:|
-| initial `VirtualQuery` protection | 8 | 8 |
-| `VirtualProtect(READONLY)`, returned old | **8** | **4** |
-| `READWRITE` → touch byte → `READONLY`, returned old | **8** | **4** |
+The launcher bug that led to this guide involved how Wine reports memory protection.
+You do not need to understand that detail to follow the guide.
 
-Build with llvm-mingw (or any i686 PE toolchain):
+The [technical write-up](docs/technical-notes.md) preserves the diagnosis and
+verification. The small utilities in [`tools/`](tools/) and the optional
+[troubleshooting prompts](AGENT-PROMPT.md) are for deeper investigation.
 
-```sh
-i686-w64-mingw32-clang -nostdlib -Wl,-subsystem:console \
-  -o writecopy-probe32.exe tools/writecopy-probe32.c -lkernel32
-```
-
-Adjust the DLL path and the RVA inside the file if your build differs.
-
-## Confirming it is the same bug in your app (about two minutes)
-
-1. Note the crash address and the module base (`winedbg` → `info share`, or
-   `WINEDEBUG=+loaddll`). RVA = address − base.
-2. `python3 tools/pe-inspect.py <the.dll> --addr <crash-addr> --base <module-base>`
-   If it prints `cc 0f 0b`, it is a Chromium `CHECK`, not a debugger breakpoint —
-   stop trying flags.
-3. Re-run with `WINEDEBUG=+virtual,+seh` and find the last `NtProtectVirtualMemory`
-   on the crashing thread. If its target page is the one in the faulting function and
-   the new protection is `2` (`PAGE_READONLY`), this is the bug.
-4. Set `WINE_SIMULATE_WRITECOPY=1`.
-
-## Scope
-
-This is ordinary compatibility debugging. It is not specific to Battle.net: any
-Chromium/CEF application under Wine can hit it, since `base::ProtectedMemory` is
-generic Chromium infrastructure. Nothing here modifies, bypasses or circumvents any
-game binary, DRM or anti-cheat mechanism.
-
-## Not included
-
-No logs, no game files, no Wine or engine binaries, no account data. Only the finding,
-a probe and a small PE inspection helper.
-
-## License
-
-MIT, see `LICENSE`.
+Documentation and included tools: [MIT license](LICENSE). Wine, Apple graphics
+components, Battle.net, and Diablo IV are separate projects with their own licenses;
+their binaries and account data are not included here.

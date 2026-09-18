@@ -4,8 +4,8 @@
 Answers three questions that decide whether chasing more flags is worthwhile:
 
   * which section / file offset does the faulting address map to?
-  * is the instruction Chromium's IMMEDIATE_CRASH (`cc 0f 0b` = int3; ud2),
-    i.e. a failed CHECK() rather than a debugger breakpoint?
+  * does the instruction match an immediate-crash pattern (`cc 0f 0b` = int3; ud2)
+    whose preceding condition needs investigation?
   * which imported API does a given call site call (IAT lookup)?
 
 Usage:
@@ -107,10 +107,10 @@ def main():
     print('RVA %#x -> section %s, file offset %#x' % (rva, name, o))
     print('bytes: ' + pe.d[o:o + 16].hex(' '))
     if pe.d[o:o + 3] == b'\xcc\x0f\x0b':
-        print('\n>>> cc 0f 0b = int3; ud2 = Chromium IMMEDIATE_CRASH()')
-        print('>>> This is a FAILED CHECK(), not a debugger breakpoint.')
-        print('>>> The message is compiled out in official builds - do not look for it')
-        print('>>> in the log. Disassemble backwards to find the condition instead.')
+        print('\n>>> cc 0f 0b = int3; ud2, consistent with an immediate-crash path.')
+        print('>>> These bytes alone do not identify the failed check or its cause.')
+        print('>>> Disassemble from a known function boundary to find the condition,')
+        print('>>> then verify the relevant API result. See docs/technical-notes.md.')
     if a.disasm:
         try:
             from capstone import Cs, CS_ARCH_X86, CS_MODE_32, CS_MODE_64
